@@ -1,5 +1,7 @@
 from django.contrib import admin
-from .models import CustomUser, Tier, Image
+from django.utils.html import format_html
+
+from .models import CustomUser, Image, Tier
 
 
 class TierAdmin(admin.ModelAdmin):
@@ -7,12 +9,36 @@ class TierAdmin(admin.ModelAdmin):
 
 
 class ImageAdmin(admin.ModelAdmin):
-    list_display = ("id", "image", "user")  # Adjust this to your Image model fields
+    list_display = ("id", "image_preview", "thumbnail_preview", "user")
+
+    def image_preview(self, obj):
+        return format_html(
+            '<img src="{}" width="100" height="100" />'.format(obj.image.url)
+        )
+
+    image_preview.short_description = "Image Preview"
+
+    def thumbnail_preview(self, obj):
+        if obj.thumbnails.exists():
+            thumbnails_html = "".join(
+                [
+                    '<img src="{}" width="50" height="50" />'.format(
+                        thumbnail.image.url
+                    )
+                    for thumbnail in obj.thumbnails.all()
+                ]
+            )
+            return format_html(thumbnails_html)
+        else:
+            return "No thumbnails"
+
+    thumbnail_preview.short_description = "Thumbnail Preview"
 
 
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from django.contrib.auth.forms import UserChangeForm, UserCreationForm
+
 from .models import CustomUser
 
 
@@ -23,11 +49,13 @@ class CustomUserAdmin(UserAdmin):
     list_display = [
         "username",
         "email",
+        "account_tier",
         "is_staff",
     ]
     fieldsets = (
         (None, {"fields": ("username", "password")}),
         (("Personal info"), {"fields": ("first_name", "last_name", "email")}),
+        (("Tier"), {"fields": ("account_tier",)}),
         (
             ("Permissions"),
             {
@@ -41,7 +69,6 @@ class CustomUserAdmin(UserAdmin):
             },
         ),
         (("Important dates"), {"fields": ("last_login", "date_joined")}),
-        (("Custom Fields"), {"fields": ("account_tier",)}),
     )
     add_fieldsets = (
         (

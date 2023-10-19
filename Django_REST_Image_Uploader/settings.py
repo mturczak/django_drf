@@ -25,6 +25,10 @@ SECRET_KEY = "django-insecure-$295#o^ghk85nm6iwq#%zza(*^rv#ep@!1ce_+7-2@#k((^58s
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
+
+MEDIA_ROOT = os.path.join(BASE_DIR, "images")
+MEDIA_URL = "/media/"
+
 ALLOWED_HOSTS = []
 
 AUTH_USER_MODEL = "Django_API.CustomUser"
@@ -39,13 +43,11 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "rest_framework.authtoken",
-    "rest_framework_simplejwt",
     "Django_API",
 ]
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
         "rest_framework.authentication.BasicAuthentication",
         "rest_framework.authentication.TokenAuthentication",
     ]

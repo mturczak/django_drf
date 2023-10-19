@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    container_name: drf_app1
+    ports:
+      - "9000:9000"
+    volumes:
+      - .:/Django_REST_Image_Uploader
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      sh -c "python manage.py makemigrations &&
+             python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:9000"

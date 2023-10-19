@@ -1,5 +1,6 @@
 from Django_API.models import CustomUser
 
+
 class CustomUserMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response

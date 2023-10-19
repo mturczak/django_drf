@@ -1,14 +1,14 @@
-from django.contrib.auth.models import AbstractUser, Group, Permission
-from django.db import models
 import os
-from PIL import Image as PilImage
 from io import BytesIO
-from django.core.signing import TimestampSigner
-from django.core.files.base import ContentFile
-from django.utils.translation import gettext as _
 
-THUMBNAIL_SIZE_200 = (200, 200)
-THUMBNAIL_SIZE_400 = (400, 400)
+from django.contrib.auth.models import AbstractUser, Group, Permission
+from django.core.files.base import ContentFile
+from django.core.signing import TimestampSigner
+from django.db import models
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from django.utils.translation import gettext as _
+from PIL import Image as PilImage
 
 
 class Tier(models.Model):
@@ -43,53 +43,73 @@ class CustomUser(AbstractUser):
     )
 
 
-class Thumbnail(models.Model):
-    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
-    image = models.ImageField(upload_to="images/")
-    parent_image = models.ForeignKey(
-        "Image", related_name="thumbnails", on_delete=models.CASCADE
-    )
-
-
 class Image(models.Model):
-    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
-    image = models.ImageField(upload_to="images/")
+    user = models.ForeignKey(
+        CustomUser, on_delete=models.CASCADE, null=True, blank=True
+    )
+    image = models.ImageField(upload_to="")
+    original_image_link = models.URLField(blank=True, null=True)
+    filename = models.CharField(max_length=255, blank=True, null=True)
 
     def save(self, *args, **kwargs):
-        super().save(
-            *args, **kwargs
-        )  # Save the instance before creating the thumbnails
-        if self.image:
+        # Flag to check if the image is being saved for the first time
+        is_new = self.pk is None
+        super().save(*args, **kwargs)
+
+        if is_new and self.image:
             # open image
-            image = PilImage.open(self.image)
+            original_image = PilImage.open(self.image)
 
             # create thumbnails
-            for size_name, size_str in self.user.account_tier.thumbnail_sizes.items():
-                width, height = map(
-                    int, size_str.split("x")
-                )  # split the string and convert to integers
-                image.thumbnail((width, height), PilImage.LANCZOS)
-                thumb_name, thumb_extension = os.path.splitext(self.image.name)
-                thumb_extension = thumb_extension.lower()
-                thumb_filename = (
-                    thumb_name + f"_{size_name}_thumb_{size_str}" + thumb_extension
-                )
-                temp_thumb = BytesIO()
-                image.save(temp_thumb, format="JPEG")
-                temp_thumb.seek(0)
+            for (
+                size_name,
+                size_str,
+            ) in self.user.account_tier.thumbnail_sizes.items():
+                with BytesIO() as temp_thumb:
+                    # Create a copy of the original image for each thumbnail
+                    image = original_image.copy()
+                    width, height = map(
+                        int, size_str.split("x")
+                    )  # split the string and convert to integers
+                    image.thumbnail((width, height), PilImage.LANCZOS)
+                    thumb_name, thumb_extension = os.path.splitext(self.image.name)
+                    thumb_extension = thumb_extension.lower()
+                    thumb_filename = (
+                        thumb_name + f"_{size_name}_thumb_{size_str}" + thumb_extension
+                    )
+                    image.save(temp_thumb, format="JPEG")
+                    temp_thumb.seek(0)
 
-                # Save the thumbnail image to a new ImageField
-                thumb_file = ContentFile(temp_thumb.read(), name=thumb_filename)
-                Thumbnail.objects.create(
-                    image=thumb_file, user=self.user, parent_image=self
-                )
+                    # Save the thumbnail image to a new ImageField
+                    thumb_file = ContentFile(temp_thumb.read(), name=thumb_filename)
+                    thumbnail = Thumbnail.objects.create(
+                        image=thumb_file, user=self.user, parent_image=self
+                    )
 
-                temp_thumb.close()
+            # Save the original image link in the Image model
+            self.original_image_link = self.image.url
+
+            # Save the model without creating the thumbnails again
+            super().save(update_fields=["original_image_link"])
 
     def get_expiring_link(self, expire_seconds):
-        if self.user.account_tier == CustomUser.ENTERPRISE:
+        if self.user.account_tier == getattr(CustomUser, "ENTERPRISE", None):
             signer = TimestampSigner()
             value = signer.sign(self.image.url)
             return {"signed_value": value, "expire_seconds": expire_seconds}
         else:
             return None
+
+
+class Thumbnail(models.Model):
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    image = models.ImageField(upload_to="thumbnails/")
+    parent_image = models.ForeignKey(
+        Image, related_name="thumbnails", on_delete=models.CASCADE
+    )
+
+
+@receiver(post_save, sender=Image)
+def create_thumbnails(sender, instance, created, **kwargs):
+    if created:
+        instance.save()

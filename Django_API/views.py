@@ -1,55 +1,20 @@
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.response import Response
-from rest_framework.views import APIView
-from rest_framework import status
-from rest_framework.generics import ListAPIView
-from .models import CustomUser, Image
-from .serializers import ImageSerializer
-from django.contrib.auth.mixins import LoginRequiredMixin
-from rest_framework.permissions import IsAuthenticated
-
-
-from django.core import signing
-from django.http import JsonResponse
-from datetime import timedelta
-from django.utils import timezone
-
-
-from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework.response import Response
-from django.contrib.auth import authenticate
-from rest_framework.views import APIView
-
+from os.path import basename
 
 from django.contrib.auth.hashers import check_password
-from .models import CustomUser
+from django.core.signing import BadSignature, TimestampSigner
+from django.http import FileResponse, HttpResponse, JsonResponse
+from django.shortcuts import get_object_or_404
+from django.urls import reverse
+from rest_framework import status
+from rest_framework.exceptions import NotFound
+from rest_framework.generics import ListAPIView, RetrieveAPIView
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-
-class LoginView(APIView):
-    def post(self, request):
-        username = request.POST.get("username")
-        password = request.POST.get("password")
-        try:
-            user = CustomUser.objects.get(username=username)
-        except CustomUser.DoesNotExist:
-            return Response({"error": "Invalid Credentials"}, status=400)
-
-        if user and check_password(password, user.password):
-            refresh = RefreshToken.for_user(user)
-            return Response(
-                {
-                    "refresh": str(refresh),
-                    "access": str(refresh.access_token),
-                    "passwords": f"{password, user.password, check_password(password, user.password)}",
-                }
-            )
-        else:
-            return Response(
-                {
-                    "error": f"Invalid Credentials{password, user.password, check_password(password, user.password)}"
-                },
-                status=400,
-            )
+from .models import Image
+from .serializers import ImageSerializer
 
 
 class ImageUploadView(APIView):
@@ -60,32 +25,21 @@ class ImageUploadView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
-        image_serializer = ImageSerializer(data=request.data)
+        serializer = self.get_serializer(
+            data=request.data, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        filename = basename(request.data["image"].name)
 
-        if image_serializer.is_valid():
-            image_serializer.save(user=request.user)
-            image = Image.objects.get(id=image_serializer.data["id"])
-            response_data = image_serializer.data
+        # Add the filename to the validated data
+        serializer.validated_data["filename"] = filename
+        serializer.save(user_id=request.user.id)
+        response_data = serializer.data
 
-            # Add links to the thumbnails and original image based on the user's account tier
-            if request.user.account_tier.name == "Basic":
-                response_data["thumbnail_200_link"] = image.thumbnails["200"]
-            elif request.user.account_tier.name == "Premium":
-                response_data["thumbnail_200_link"] = image.thumbnails["200"]
-                response_data["thumbnail_400_link"] = image.thumbnails["400"]
-                response_data["original_image_link"] = image.image.url
-            elif request.user.account_tier.name == "Enterprise":
-                response_data["thumbnail_200_link"] = image.thumbnails["200"]
-                response_data["thumbnail_400_link"] = image.thumbnails["400"]
-                response_data["original_image_link"] = image.image.url
-                response_data["expiring_link"] = image.get_expiring_link(
-                    300
-                )  # Default expiration time is 300 seconds
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
-            return Response(response_data, status=status.HTTP_201_CREATED)
-
-        else:
-            return Response(image_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    def get_serializer(self, *args, **kwargs):
+        return ImageSerializer(*args, **kwargs)
 
 
 class ImageListView(ListAPIView):
@@ -99,10 +53,10 @@ class ImageListView(ListAPIView):
 class ExpiringLinkView(APIView):
     def get(self, request, *args, **kwargs):
         image_id = kwargs.get("image_id")
-        image = Image.objects.get(id=image_id)
+        image = get_object_or_404(Image, id=image_id)
 
         # Check if the user has the right to generate an expiring link
-        if request.user.account_tier != "Enterprise":
+        if not image.user.account_tier.expiring_links:
             return Response(
                 {"message": "You do not have the right to generate an expiring link."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -113,12 +67,53 @@ class ExpiringLinkView(APIView):
         expire_seconds = max(300, min(int(expire_seconds), 30000))
 
         # Generate the signed URL
-        signer = signing.TimestampSigner()
+        signer = TimestampSigner()
         value = signer.sign(str(image_id))
-        expiring_link = {
-            "image_id": image_id,
-            "signed_value": value,
-            "expire_seconds": expire_seconds,
-        }
+        expiring_link = reverse("serve_image", args=[value])
 
-        return JsonResponse(expiring_link)
+        return JsonResponse(
+            {
+                "image_id": image_id,
+                "expiring_link": request.build_absolute_uri(expiring_link),
+                "expire_seconds": expire_seconds,
+            }
+        )
+
+
+class ImageView(RetrieveAPIView):
+    queryset = Image.objects.all()
+    serializer_class = ImageSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        filename = self.kwargs.get("filename")
+
+        filter_kwargs = {"image": filename}
+
+        obj = get_object_or_404(queryset, **filter_kwargs)
+
+        self.check_object_permissions(self.request, obj)
+
+        return obj
+
+    def get(self, request, *args, **kwargs):
+        instance = self.get_object()
+        image_data = open(instance.image.path, "rb").read()
+        return HttpResponse(image_data, content_type="image/jpeg")
+
+
+def serve_image(request, signed_value):
+    signer = TimestampSigner()
+
+    try:
+        # Unsign the value to get the image ID
+        image_id = signer.unsign(signed_value, max_age=300)
+    except BadSignature:
+        raise NotFound("No such image")
+
+    image = get_object_or_404(Image, id=image_id)
+
+    # Serve the image
+    return FileResponse(image.image.file)
