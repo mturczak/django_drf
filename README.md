@@ -49,7 +49,7 @@ API requests to use:
 - optional original image link 
 - optional expire_link_example link
 
-```GET http://localhost:9000/image/list/``` - getting the list of the user's image. In Response indluded are:
+```GET http://localhost:9000/image/list/``` - getting the list of the user's image. In Response included are:
 
 For all images:
 - specified in tier thumbnails
